@@ -1,0 +1,18 @@
+name: ict_render_pytorch3d
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - numpy=1.23.5
+  - pillow
+  - matplotlib
+  - pip:
+    - torch==1.13.1
+    - torchvision==0.14.1
+    - pytorch3d==0.7.8
+    - tqdm
+    - iopath
+    - fvcore

@@ -16,12 +16,16 @@ def load_model_and_processor(use_registers=True):
     model_name = "facebook/dinov2-with-registers-base" if use_registers else "facebook/dinov2-base"
     processor = AutoImageProcessor.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name)
-    
-    # Move model to GPU if available
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Check for MPS (Metal Performance Shaders) availability
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     print(f"Using device: {device}")
     model = model.to(device)
-    
+
     return model, processor, device
 
 def pad_to_square(image):
@@ -41,12 +45,27 @@ def pad_to_square(image):
     
     return new_image
 
-
-
-def process_image(image_path, model, processor, device, use_custom_preprocessing=False, use_registers=False):
-    """Process a single image and return its token embeddings."""
-    # Load the image
-    original_image = Image.open(image_path).convert('RGB')
+def process_image(image_input, model, processor, device, use_custom_preprocessing=False, use_registers=False):
+    """Process a single image and return its token embeddings.
+    
+    Args:
+        image_input: Either a file path (str) or a PIL Image object
+        model: DinoV2 model
+        processor: DinoV2 processor
+        device: Device to run inference on
+        use_custom_preprocessing: Whether to use custom preprocessing
+        use_registers: Whether to use DinoV2 with registers
+    
+    Returns:
+        token_embeddings: Token embeddings from DinoV2
+        processed_image: The processed PIL Image
+        grid_shape: Tuple of (grid_h, grid_w)
+    """
+    # Load the image if a file path is provided
+    if isinstance(image_input, str):
+        original_image = Image.open(image_input).convert('RGB')
+    else:
+        original_image = image_input
     
     if use_custom_preprocessing:
         # Pad to square and resize to 518x518
@@ -74,7 +93,7 @@ def process_image(image_path, model, processor, device, use_custom_preprocessing
         processed_image = original_image
         # Preprocess the image using the processor
         inputs = processor(images=processed_image, return_tensors="pt")
-        # Move inputs to GPU
+        # Move inputs to the correct device
         inputs = {k: v.to(device) for k, v in inputs.items()}
     
     # Get model outputs
@@ -145,7 +164,8 @@ def save_pca_models(pca_mask, pca_rgb, clustering_model, output_path):
 
 def load_pca_models(input_path):
     """Load PCA models from a .pt file."""
-    pca_models = torch.load(input_path)
+    # Load the model file
+    pca_models = torch.load(input_path, map_location='cpu')
     
     # Reconstruct PCA models
     pca_mask = PCA(n_components=pca_models['pca_mask']['n_components'])
@@ -540,4 +560,4 @@ def main():
     print("\nProcessing complete!")
 
 if __name__ == "__main__":
-    main() 
+    main()
