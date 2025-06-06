@@ -10,6 +10,7 @@ from pytorch3d.renderer import (
     Materials,
     look_at_view_transform,
     FoVPerspectiveCameras,
+    TexturesUV,
 )
 from pytorch3d.structures import Meshes
 import matplotlib.pyplot as plt
@@ -37,17 +38,73 @@ parser = argparse.ArgumentParser(description='Render 3D face model with texture'
 parser.add_argument('--obj', type=str, 
                     default='./data/DNEGSynFace_topology/generic_neutral_mesh.obj',
                     help='Path to the OBJ file')
-parser.add_argument('--fov', type=float, default=8, 
+parser.add_argument('--fov', type=float, default=12, 
                     help='Field of view for the camera')
 args = parser.parse_args()
 
-# Load the mesh without filtering
+# Load the mesh
 mesh = load_objs_as_meshes([args.obj], device=device)
-meshes = Meshes(
-    verts=[mesh.verts_list()[0].to(device)],
-    faces=[mesh.faces_list()[0].to(device)],
-    textures=mesh.textures
-)
+
+# Define a Y-threshold in world coordinates to clip the mesh from below
+y_threshold_world = -8.5  # You can adjust this value
+
+# Get original vertices, faces, and textures
+verts = mesh.verts_list()[0]
+faces = mesh.faces_list()[0]
+textures = mesh.textures
+
+# Print vertex y-range for reference
+print(f"Original Y-vertex range: [{verts[:, 1].min():.2f}, {verts[:, 1].max():.2f}]")
+print(f"Filtering vertices with Y > {y_threshold_world}")
+
+# Create a mask for vertices above the threshold
+vert_mask = verts[:, 1] > y_threshold_world
+new_verts = verts[vert_mask]
+print(f"Number of vertices kept: {new_verts.shape[0]} / {verts.shape[0]}")
+
+if new_verts.shape[0] > 0 and new_verts.shape[0] < verts.shape[0]:
+    # Create a mapping from old vertex indices to new vertex indices
+    old_to_new_vert_indices = -torch.ones(verts.shape[0], dtype=torch.long, device=device)
+    old_to_new_vert_indices[vert_mask] = torch.arange(new_verts.shape[0], device=device)
+
+    # Filter faces: keep only faces where all 3 vertices are in the new set of vertices
+    face_vert_mask = vert_mask[faces]
+    valid_faces_mask = face_vert_mask.all(dim=1)
+    new_faces = old_to_new_vert_indices[faces[valid_faces_mask]]
+    print(f"Number of faces kept: {new_faces.shape[0]} / {faces.shape[0]}")
+
+    # Filter texture coordinates corresponding to the filtered faces
+    faces_uvs = textures.faces_uvs_list()[0]
+    new_faces_uvs = faces_uvs[valid_faces_mask]
+
+    # Create a new TexturesUV object
+    new_textures = TexturesUV(
+        maps=textures.maps_padded(),
+        verts_uvs=textures.verts_uvs_list(),
+        faces_uvs=[new_faces_uvs]
+    )
+
+    # Create the new filtered mesh object
+    meshes = Meshes(
+        verts=[new_verts],
+        faces=[new_faces],
+        textures=new_textures
+    )
+elif new_verts.shape[0] == verts.shape[0]:
+    print("No vertices were filtered out.")
+    meshes = Meshes(
+        verts=[mesh.verts_list()[0].to(device)],
+        faces=[mesh.faces_list()[0].to(device)],
+        textures=mesh.textures
+    )
+else:
+    print("Warning: All vertices were filtered out. Rendering an empty mesh.")
+    # Create an empty mesh to avoid crashing
+    meshes = Meshes(
+        verts=[torch.empty((0, 3), device=device)],
+        faces=[torch.empty((0, 3), dtype=torch.long, device=device)],
+        textures=None
+    )
 
 # Get material properties from the loaded mesh if available
 if hasattr(mesh, 'materials'):
@@ -64,7 +121,7 @@ else:
 
 # Set up camera for right-facing view
 R, T = look_at_view_transform(
-    eye=((-150, 150, 150),),  # Camera at (0, 0, 150) - front view
+    eye=((0, 0, 150),),  # Camera at (0, 0, 150) - front view
     at=((0, 0, 0),),    # Looking at origin
     up=((0, 1, 0),),    # Y-axis up
     device=device
@@ -107,19 +164,6 @@ z_depth_map = fragments.zbuf[0, ..., 0].detach().clone()
 rendered_image = images[0, ..., :3].cpu().numpy()
 rendered_image = np.clip(rendered_image, 0, 1)
 
-# Create mask for regions below threshold (in image space)
-y_threshold = 0.8108108108108108  # Adjust this value as needed (basically 30 patches from the top)
-y_coords = torch.linspace(0, 1, rendered_image.shape[0], device=device)
-mask = y_coords.unsqueeze(1).expand(-1, rendered_image.shape[1]) < y_threshold
-
-# Apply mask to rendered image
-rendered_image_masked = rendered_image.copy()
-rendered_image_masked[~mask.cpu().numpy()] = 0
-
-# Apply mask to depth map before sampling
-z_depth_map_masked = z_depth_map.clone()
-z_depth_map_masked[~mask] = -1  # Fill masked regions with -1
-
 # Calculate 3D coordinates for patch centers
 num_patches = 37
 image_render_size_h, image_render_size_w = 518, 518
@@ -138,7 +182,7 @@ x_centers = (patch_indices_x.float() + 0.5) * patch_size_w        #7, 21, 35...
 y_centers = (patch_indices_y.float() + 0.5) * patch_size_h        #7, 21, 35...
 
 # Sample Z-depth and convert to 3D coordinates
-z_depth_map_for_sample = z_depth_map_masked.unsqueeze(0).unsqueeze(0)  # Use masked depth map
+z_depth_map_for_sample = z_depth_map.unsqueeze(0).unsqueeze(0)  # Use masked depth map
 norm_x = (x_centers / (image_render_size_w - 1.0)) * 2.0 - 1.0
 norm_y = (y_centers / (image_render_size_h - 1.0)) * 2.0 - 1.0
 sampling_grid = torch.stack((norm_x, norm_y), dim=-1).unsqueeze(0)
@@ -184,13 +228,13 @@ plt.figure(figsize=(15, 5))
 
 # 1. Rendered Image with Mask
 plt.subplot(131)
-plt.imshow(rendered_image_masked)
+plt.imshow(rendered_image)
 plt.title('Rendered Image\n(Masked)')
 plt.axis('off')
 
 # 2. Z-depth Map
 plt.subplot(132)
-z_depth_vis = z_depth_map_masked.cpu().numpy()
+z_depth_vis = z_depth_map.cpu().numpy()
 z_depth_vis[z_depth_vis > 0] = np.log(z_depth_vis[z_depth_vis > 0])
 plt.imshow(z_depth_vis, cmap='viridis')
 plt.colorbar(label='log(Z-depth)')
@@ -278,7 +322,7 @@ plt.show()
 # After viewing, save the visualizations
 plt.figure(figsize=(15, 5))
 plt.subplot(131)
-plt.imshow(rendered_image_masked)
+plt.imshow(rendered_image)
 plt.title('Rendered Image\n(Masked)')
 plt.axis('off')
 
@@ -321,7 +365,7 @@ plt.savefig('./output/single_image_fitting/left/template_3d.png')
 plt.close()
 
 # Convert rendered image to PIL Image for DinoV2 processing
-rendered_image_pil = Image.fromarray((rendered_image_masked * 255).astype(np.uint8))
+rendered_image_pil = Image.fromarray((rendered_image * 255).astype(np.uint8))
 
 # Load DinoV2 model and processor with default settings from process_image_sequence
 print("Loading DinoV2 model and processor...")
@@ -387,7 +431,7 @@ plt.figure(figsize=(15, 5))
 
 # 1. Original rendered image
 plt.subplot(131)
-plt.imshow(rendered_image_masked)
+plt.imshow(rendered_image)
 plt.title('Rendered Image\n(Masked)')
 plt.axis('off')
 
@@ -409,7 +453,7 @@ plt.show()
 
 # Store data with both original and PCA embeddings
 view_data = {
-    'rendered_image': torch.from_numpy(rendered_image_masked).permute(2, 0, 1),
+    'rendered_image': torch.from_numpy(rendered_image).permute(2, 0, 1),
     'patch_centers_3d_coords': patch_centers_3d_coords.cpu(),
     'patch_centers_z_depth': sampled_depths.cpu(),
     'dino_embeddings': torch.from_numpy(token_embeddings),  # Original high-dimensional embeddings
