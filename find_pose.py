@@ -3,6 +3,7 @@ import argparse
 import numpy as np
 import torch
 import cv2
+import os
 from pytorch3d.io import load_obj
 from pytorch3d.renderer import (
     RasterizationSettings,
@@ -11,7 +12,6 @@ from pytorch3d.renderer import (
     SoftPhongShader,
     TexturesVertex,
     PointLights,
-    Materials,
     FoVPerspectiveCameras,
     BlendParams
 )
@@ -38,7 +38,7 @@ def find_feature_matches(latents1, latents2, mask1, mask2):
     coords2 = np.argwhere(mask2.reshape(-1) == 1)
     
     # Compute pairwise distances
-    distances = cdist(latents1, latents2, metric='euclidean')
+    distances = cdist(latents1, latents2, metric='cosine')
     
     # Sort matches by distance
     all_matches = []
@@ -65,12 +65,20 @@ def find_feature_matches(latents1, latents2, mask1, mask2):
     
 
     # preserve only the top 75% of the matches
-    match_distances = match_distances[:(3*len(match_distances))//4]
-    matches = [matches[i] for i in range(len(match_distances))]
+    # match_distances = match_distances[:(3*len(match_distances))//4]
+    # matches = [matches[i] for i in range(len(match_distances))]
+    print("Average distance of matches:", np.mean(match_distances))
     
     return matches, match_distances
 
-def estimate_pose(real_points_2d, rendered_points_3d, camera_matrix, select_top_k_percent_matches=None):
+def estimate_affine_pose(real_points_2d, rendered_points_2d, verbose=False):
+    """Estimate affine pose using RANSAC algorithm."""
+    # Use RANSAC to estimate affine transformation
+    H, inliers = cv2.estimateAffinePartial2D(real_points_2d, rendered_points_2d)
+    inlier_ratio = len(inliers) / len(real_points_2d)
+    return H, inliers, inlier_ratio
+
+def estimate_pose(real_points_2d, rendered_points_3d, camera_matrix, select_top_k_percent_matches=None, verbose=False):
     """Estimate pose using PnP-RANSAC algorithm.
     
     Args:
@@ -83,6 +91,7 @@ def estimate_pose(real_points_2d, rendered_points_3d, camera_matrix, select_top_
         rvec: Rotation vector
         tvec: Translation vector
         inliers: Boolean array indicating which points are inliers
+        inlier_ratio: Ratio of inliers to total points
     """
 
     if select_top_k_percent_matches is not None:
@@ -94,9 +103,6 @@ def estimate_pose(real_points_2d, rendered_points_3d, camera_matrix, select_top_
 
     # assign a random color to each point
     colors = np.random.rand(len(real_points_2d), 3)
-
-    # reflect the rendered points 2d about the yz-plane
-    rendered_points_3d[:, 0] = -rendered_points_3d[:, 0]
 
     # Scale rendered 3D points to [0, 1] first, then to [0, 518]
     rendered_points_2d = rendered_points_3d[:, :2]  # Take only x,y coordinates
@@ -133,7 +139,7 @@ def estimate_pose(real_points_2d, rendered_points_3d, camera_matrix, select_top_
         plt.tight_layout()
         plt.show()
     
-    reprojection_error = 22
+    reprojection_error = 14
     # Use PnP-RANSAC with stricter parameters for more reliable matches
     success, rvec, tvec, inliers = cv2.solvePnPRansac(
         rendered_points_3d, 
@@ -142,29 +148,32 @@ def estimate_pose(real_points_2d, rendered_points_3d, camera_matrix, select_top_
         None,
         iterationsCount=50000,  # More iterations for better convergence
         reprojectionError=reprojection_error,  # Stricter reprojection error (was 12.0)
-        confidence=0.95,  # Higher confidence threshold (was 0.95)
+        confidence=0.99,  # Higher confidence threshold (was 0.95)
         flags=cv2.SOLVEPNP_EPNP,  # Using EPNP for better initialization
     )
     
-    print("percentage of inliers", len(inliers) / len(real_points_2d))
     if not success:
-        raise ValueError("PnP pose estimation failed")
+        print("PnP pose estimation failed")
+        return None, None, None, 0.0
     
     # Ensure rvec and tvec are in the correct format
     rvec = np.asarray(rvec, dtype=np.float32)
     tvec = np.asarray(tvec, dtype=np.float32)
 
-    # Project 3D points using estimated pose
-    projected_points, _ = cv2.projectPoints(rendered_points_3d, rvec, tvec, camera_matrix, None)
-    projected_points = projected_points.reshape(-1, 2)
-
     # print the mean and max of the point distances
-    point_distances = np.sqrt(np.sum((projected_points - real_points_2d)**2, axis=1))
-    print(f"Mean reprojection error: {np.mean(point_distances):.2f} pixels")
-    print(f"Max reprojection error: {np.max(point_distances):.2f} pixels")
-    print(f"Number of RANSAC inliers: {len(inliers)}")
-    print(f"Number of inliers within reprojection error: {np.sum(point_distances < reprojection_error)}")
-    return rvec, tvec, inliers
+    if verbose:
+        # Project 3D points using estimated pose
+        projected_points, _ = cv2.projectPoints(rendered_points_3d, rvec, tvec, camera_matrix, None)
+        projected_points = projected_points.reshape(-1, 2)
+        point_distances = np.sqrt(np.sum((projected_points - real_points_2d)**2, axis=1))
+        print(f"Mean reprojection error: {np.mean(point_distances):.2f} pixels")
+        print(f"Max reprojection error: {np.max(point_distances):.2f} pixels")
+        print(f"Number of inliers: {len(inliers)}")
+        print(f"Number of inliers within reprojection error: {np.sum(point_distances < reprojection_error)}")
+        print(f"Total number of points: {len(real_points_2d)}")
+        print(f"Percentage of inliers: {len(inliers) / len(real_points_2d):.2f}")
+        print('\n\n')
+    return rvec, tvec, inliers,len(inliers) / len(real_points_2d)
 
 def render_mesh_overlay(mesh_path, rvec, tvec, fov, image_size, original_image, camera_matrix, image_size_opencv_np):
     """Render a mesh using PyTorch3D and create an overlay with the original image.
@@ -186,8 +195,14 @@ def render_mesh_overlay(mesh_path, rvec, tvec, fov, image_size, original_image, 
     rvec_opencv_torch = torch.from_numpy(rvec).float().unsqueeze(0)[..., 0] # (1, 3)
     R_opencv_torch = so3_exp_map(rvec_opencv_torch) # (1, 3, 3)
 
+    # Flip the rotation matrix to match the flipped 3D points
+    flip_matrix = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]], device=rvec_opencv_torch.device, dtype=torch.float32)
+    R_opencv_torch = flip_matrix @ R_opencv_torch @ flip_matrix
+
     # 2. Convert tvec and camera_matrix to PyTorch tensors
     tvec_opencv_torch = torch.from_numpy(tvec).float().unsqueeze(0) # (1, 3)
+    # Flip the translation vector to match the flipped 3D points
+    # tvec_opencv_torch[..., 0] = -tvec_opencv_torch[..., 0]
     camera_matrix_opencv_torch = torch.from_numpy(camera_matrix).float().unsqueeze(0) # (1, 3, 3)
     image_size_torch = torch.tensor((image_size_opencv_np, image_size_opencv_np)).float().unsqueeze(0) # (1, 2)
 
@@ -267,14 +282,6 @@ def render_mesh_overlay(mesh_path, rvec, tvec, fov, image_size, original_image, 
     images = renderer(meshes)
     rendered_image = images[0, ..., :3].cpu().numpy()
     
-    # # Debug: Save the rendered image without overlay
-    # plt.figure(figsize=(10, 10))
-    # plt.imshow(rendered_image)
-    # plt.title('Debug: Rendered Mesh Only')
-    # plt.axis('off')
-    # plt.savefig('debug_rendered_mesh.png')
-    # plt.close()
-    
     # Create overlay with original image
     alpha = 0.5
     mask = (rendered_image.sum(axis=2) > 0).astype(np.float32)
@@ -285,7 +292,7 @@ def render_mesh_overlay(mesh_path, rvec, tvec, fov, image_size, original_image, 
     return overlay
 
 def visualize_comparison(image1_path, render_data_path, output_folder,  model, processor, device, pca_mask, pca_rgb, filename = "pose_estimation", 
-                        use_custom_preprocessing=False, use_registers=False, threshold_greater_than=False, mesh_path=None, fov=45, debug=False):
+                        use_custom_preprocessing=True, use_registers=True, threshold_greater_than=False, mesh_path=None, fov=12, debug=False, save_results=True, use_affine_estimation=False, plot_title=None):
     """Process a real image and a rendered image from saved data and visualize their latent space comparison."""
     global DEBUG
     DEBUG = debug
@@ -293,7 +300,6 @@ def visualize_comparison(image1_path, render_data_path, output_folder,  model, p
     latents1, img1, grid_shape = process_image(image1_path, model, processor, device, use_custom_preprocessing, use_registers)
     
     # Load rendered image from saved data
-    print(f"Loading rendered data from {render_data_path}")
     render_data = torch.load(render_data_path)
     rendered_image = render_data['rendered_image']  # Shape: (3, H, W)
     patch_centers_3d = render_data['patch_centers_3d_coords']  # Shape: (37, 37, 3)
@@ -383,14 +389,10 @@ def visualize_comparison(image1_path, render_data_path, output_folder,  model, p
     all_matches, match_distances = find_feature_matches(filtered_latents1, filtered_latents2, 
                                     largest_mask1, largest_mask2)
     
-    
-    print(f"\nTotal number of feature matches: {len(all_matches)}")
-    
-    
     # Extract 2D points from matches
     real_points_2d = []
     rendered_points_3d = []
-    
+    rendered_points_2d = []
 
     for idx1, idx2 in all_matches:
         # Get 2D coordinates in real image in latent space (37x37)
@@ -400,28 +402,28 @@ def visualize_comparison(image1_path, render_data_path, output_folder,  model, p
         # Get 3D coordinates from rendered image
         y2, x2 = idx2 // grid_w, idx2 % grid_w
         rendered_points_3d.append(patch_centers_3d[y2, x2])
+
+        # Get 2D coordinates from rendered image
+        y2, x2 = idx2 // grid_w, idx2 % grid_w
+        rendered_points_2d.append([x2, y2])
     
     real_points_2d = np.array(real_points_2d, dtype=np.float32)
     rendered_points_3d = np.array(rendered_points_3d, dtype=np.float32)
-    
+    rendered_points_2d = np.array(rendered_points_2d, dtype=np.float32)
+
     # Filter out points with NaN values
     valid_mask = ~np.isnan(rendered_points_3d).any(axis=1)
     real_points_2d = real_points_2d[valid_mask]
     rendered_points_3d = rendered_points_3d[valid_mask]
-    
-    print(f"\nAfter filtering NaN values:")
-    print(f"Number of valid point pairs: {len(real_points_2d)}")
-    
+    rendered_points_2d = rendered_points_2d[valid_mask]
     # Scale points from 37x37 to 518x518
     scale_factor = 518 / 37
     real_points_2d_scaled = real_points_2d * scale_factor
     
     # Create initial camera matrix for 518x518 resolution
-    # Convert to PyTorch3D camera parameters
     image_size = 518
     
     # Calculate focal length from FOV
-    # focal_length = (image_size/2) / tan(FOV/2)
     focal_length = (image_size/2) / np.tan(np.radians(fov/2))
     
     # Principal point at image center
@@ -436,12 +438,23 @@ def visualize_comparison(image1_path, render_data_path, output_folder,  model, p
     
     # Estimate pose
     try:
-        print("\nUsing PnP-RANSAC for pose estimation")
-        rvec, tvec, inliers = estimate_pose(
-            real_points_2d_scaled,
-            rendered_points_3d, 
-            initial_camera_matrix
-        )
+        if use_affine_estimation:
+            H, inliers, inlier_ratio = estimate_affine_pose(
+                real_points_2d_scaled,
+                rendered_points_2d,
+            )
+            rvec = np.zeros((3, 1), dtype=np.float32)
+            tvec = np.zeros((3, 1), dtype=np.float32)
+
+        else:
+            rvec, tvec, inliers, inlier_ratio = estimate_pose(
+                real_points_2d_scaled,
+                rendered_points_3d, 
+                initial_camera_matrix,
+                verbose=save_results
+            )
+        if not save_results:            
+            return rvec, tvec, inlier_ratio, len(all_matches), match_distances, 0 if inliers is None else len(inliers)
         R, _ = cv2.Rodrigues(rvec)
         camera_matrix = initial_camera_matrix
         
@@ -457,106 +470,73 @@ def visualize_comparison(image1_path, render_data_path, output_folder,  model, p
             'principal_point': principal_point.cpu().numpy(),  # Principal point for PyTorch3D
             'fov': fov,  # Field of view in degrees
         }
-        
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+
         # Save results to a file
         output_path = Path(output_folder) / "pnp_ransac_results.pt"
         torch.save(results, output_path)
         print(f"\nSaved PnP RANSAC results to {output_path}")
         
         # Visualize the pose estimation
-        plt.figure(figsize=(30, 10))
+        plt.figure(figsize=(30, 20))
         
         # Left subplot: Original pose estimation visualization
-        plt.subplot(131)
+        plt.subplot(231)
         plt.imshow(np.array(img1))
         plt.scatter(real_points_2d_scaled[:, 0], real_points_2d_scaled[:, 1], c='r', label='Real Image Points', alpha=0.3)
         plt.legend()
-        plt.title('Real Image Points')
+        plt.title('Real Image Points', fontsize=25)
         plt.axis('off')
         
-        # Middle subplot: Projected 3D points from mesh
-        plt.subplot(132)
-        plt.imshow(np.array(img1))
+        # display the rgb_grid1
+        plt.subplot(232)
+        plt.imshow(rgb_grid1)
+        plt.title('RGB PCA Latents (Real Image)', fontsize=25)
+        plt.axis('off')
         
-        # Project matched 3D points using estimated pose
-        projected_points, _ = cv2.projectPoints(
-            rendered_points_3d, rvec, tvec, camera_matrix, None
-        )
-        projected_points = projected_points.reshape(-1, 2)
-        
-        # Plot projected points
-        plt.scatter(projected_points[:, 0], projected_points[:, 1], c='b', label='Projected Mesh Points', alpha=0.3)
+        # Load mesh vertices
+        verts, _, _ = load_obj(mesh_path, load_textures=False)
+        verts_np = verts.cpu().numpy()
+
+        plt.subplot(233)
+        plt.scatter(verts_np[:, 0], verts_np[:, 1], s=1, c='cyan', alpha=0.7, label='Mesh Vertices')
+        plt.title('Mesh Vertices (No Pose)', fontsize=25)
+
+        plt.scatter(rendered_points_3d[:, 0], rendered_points_3d[:, 1], s=7, c='red', alpha=0.7, label='Rendered Points')
         plt.legend()
-        plt.title('Projected Mesh Points')
         plt.axis('off')
-        
-        # Right subplot: PyTorch3D rendered mesh
-        if mesh_path is not None:
-            overlay = render_mesh_overlay(
-                mesh_path,
-                rvec,
-                tvec,
-                fov,
-                image_size,
-                np.array(img1),
-                camera_matrix,
-                image_size
-            )
+
+        # Project all mesh vertices using estimated pose and camera intrinsics
+        projected_verts, _ = cv2.projectPoints(
+            verts_np, rvec, tvec, camera_matrix, None
+        )
+        projected_verts = projected_verts.reshape(-1, 2)
+
+        # display rendered_image_pil
+        plt.subplot(234)
+        plt.imshow(rendered_image_pil)
+        plt.title('Rendered Image', fontsize=25)
+
+        # display the RGB latents from rendered image
+        plt.subplot(235)
+        plt.imshow(rgb_grid2)
+        plt.title('RGB PCA Latents (Rendered Image)', fontsize=25)
+
+        plt.subplot(236)
+        plt.imshow(np.array(img1))
+        plt.scatter(projected_verts[:, 0], projected_verts[:, 1], s=1, c='cyan', alpha=0.7, label='Mesh Vertices')
+        plt.title('Projected Mesh Vertices', fontsize=25)
+        plt.axis('off')
             
-            plt.subplot(133)
-            plt.imshow(overlay)
-            plt.title('PyTorch3D Rendered Mesh Overlay')
-            plt.axis('off')
-        
         plt.tight_layout()
+        if plot_title is not None:
+            plt.title(f'{plot_title}', fontsize=25)
         plt.savefig(Path(output_folder) / (str(filename) +'.png'))
         plt.close()
-        
+
     except ValueError as e:
         print(f"Pose estimation failed: {e}")
-    
-    if DEBUG:
-        # Create a new figure for feature matches in latent space
-        plt.figure(figsize=(20, 10))
-        
-        # Create a single subplot that spans the full width
-        plt.subplot(1, 1, 1)
-        
-        # Create a combined image by placing the two RGB grids side by side
-        combined_grid = np.zeros((grid_h, grid_w * 2, 3))
-        combined_grid[:, :grid_w] = rgb_grid1
-        combined_grid[:, grid_w:] = rgb_grid2
-        
-        # Show the combined image
-        plt.imshow(combined_grid)
-        plt.title('RGB PCA Feature Matches\nLeft: Real Image, Right: Rendered Image')
-        plt.axis('off')
-        
-        # Randomly sample 100 matches for visualization
-        num_matches_to_show = min(100, len(all_matches))
-        indices = np.random.choice(len(all_matches), num_matches_to_show, replace=False)
-        sampled_matches = [all_matches[i] for i in indices]
-        
-        # Generate random colors for each line
-        colors = np.random.rand(num_matches_to_show, 3)
-        
-        # Draw lines between matched features in latent space
-        for match, color in zip(sampled_matches, colors):
-            idx1, idx2 = match
-            # Convert 1D indices to 2D coordinates
-            y1, x1 = idx1 // grid_w, idx1 % grid_w
-            y2, x2 = idx2 // grid_w, idx2 % grid_w
-            
-            # Draw line (x2 is offset by grid_w since it's in the second image)
-            plt.plot([x1, x2 + grid_w], [y1, y2], 
-                    color=color, alpha=0.9, linewidth=5)
-        
-        # Add vertical line to separate the two images
-        plt.axvline(x=grid_w, color='white', linestyle='--', alpha=0.5)
-        
-        plt.tight_layout()
-        plt.savefig(Path(output_folder) / "feature_matches_comparison.png")
-        plt.close()
 
 def main():
     parser = argparse.ArgumentParser(description='Compare a real image with a rendered image using DinoV2 and PCA projection')
@@ -568,9 +548,10 @@ def main():
                       help='Use DinoV2 base with registers instead of DinoV2 base')
     parser.add_argument('--threshold_greater_than', action='store_true', default=False,
                       help='Threshold for values greater than 0 instead of less than 0')
-    parser.add_argument('--mesh', type=str, default='./data/FFHQ_UV_sample/hack_w_HIFI3D_UV.obj', help='Path to the mesh OBJ file')
-    parser.add_argument('--fov', type=float, default=45, help='Field of view in degrees')
-    parser.add_argument('--render_data_folder', type=str, required=True, help='Path to folder containing saved render_data.pt files')
+    parser.add_argument('--mesh', type=str, default='./data/DNEGSynFace_topology/generic_neutral_mesh.obj', help='Path to the mesh OBJ file')
+    parser.add_argument('--fov', type=float, default=12, help='Field of view in degrees')
+    parser.add_argument('--render_data_file', type=str, required=True, help='Path to folder containing saved render_data.pt files')
+    parser.add_argument('--output_folder', type=str, default='./output/find_pose', help='Path to output folder')
     parser.add_argument('--debug', action='store_true', default=False, help='Debug mode')
     args = parser.parse_args()
     
@@ -587,11 +568,10 @@ def main():
     print(f"Loading PCA models from {args.pca_model}")
     pca_mask, pca_rgb, kmeans = load_pca_models(args.pca_model)
     
-    render_data = Path(args.render_data_folder) / "template_data.pt"
     # Process and visualize images
     print("Processing and visualizing images...")
-    visualize_comparison(args.image1, render_data, args.render_data_folder, model, processor, device, pca_mask, pca_rgb,
-                        args.use_custom_preprocessing, args.use_registers, args.threshold_greater_than,
+    visualize_comparison(args.image1, args.render_data_file, args.output_folder, model, processor, device, pca_mask, pca_rgb, "pose_estimation"
+                        ,args.use_custom_preprocessing, args.use_registers, args.threshold_greater_than,
                         args.mesh, args.fov, args.debug)
 
 if __name__ == "__main__":

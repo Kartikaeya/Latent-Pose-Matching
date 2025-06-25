@@ -53,7 +53,7 @@ def process_image_sequence(
     
     print(f"\nFound {len(image_files)} images to process")
     
-    render_data_folder = Path(render_data_folder) / "template_data_forward.pt"
+    render_data_folder = Path(render_data_folder) / "template_data.pt"
     # Process each image
     for i, image_file in enumerate(image_files, 1):
         print(f"\nProcessing image {i}/{len(image_files)}: {image_file}")

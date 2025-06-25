@@ -383,36 +383,14 @@ def process_sequence_with_pca(image_files, model, processor, device, pca_mask, p
         # Create visualization figure
         plt.figure(figsize=(25, 5))
         
-        # Plot original image with cluster centroids
-        plt.subplot(1, 5, 1)
+        # Plot original image
+        plt.subplot(1, 5, 2)
         plt.imshow(processed_image)
-        
-        # Get processed image dimensions (width, height)
-        processed_width, processed_height = processed_image.size
-        
-        # Calculate and plot centroids for each cluster
-        for cluster_idx in range(9):
-            # Get pixels belonging to this cluster
-            cluster_pixels = np.argwhere(cluster_label_grid == cluster_idx)
-            if len(cluster_pixels) > 0:
-                # Calculate centroid in grid coordinates
-                centroid_y = np.mean(cluster_pixels[:, 0])
-                centroid_x = np.mean(cluster_pixels[:, 1])
-                
-                # Convert grid coordinates to processed image coordinates
-                processed_centroid_x = centroid_x * (processed_width / grid_w)
-                processed_centroid_y = centroid_y * (processed_height / grid_h)
-                
-                # Plot centroid on processed image
-                plt.scatter(processed_centroid_x, processed_centroid_y, 
-                          color=cluster_colors[cluster_idx],
-                          marker='o', s=100, edgecolors='black', linewidth=2)
-        
-        plt.title(f'Frame {frame_idx + 1} with Cluster Centroids')
+        plt.title(f'Frame {frame_idx + 1}')
         plt.axis('off')
         
         # Plot histogram of compressed latent values
-        plt.subplot(1, 5, 2)
+        plt.subplot(1, 5, 1)
         plt.hist(compressed_latents, bins=50)
         plt.axvline(x=0, color='r', linestyle='--', label=threshold_label)
         plt.title(f'Distribution of Compressed Latents')
@@ -463,15 +441,15 @@ def main():
 
     parser.add_argument('--use_registers', action='store_true',
                       help='Use DinoV2 base with registers instead of DinoV2 base')
-    parser.add_argument('--threshold_greater_than', action='store_true',
+    parser.add_argument('--threshold_greater_than', action='store_true', default=False,
                       help='Threshold for values greater than 0 instead of less than 0')
     parser.add_argument('--pca_train_percent', type=float, default=10.0,
                       help='Percentage of frames to use for PCA training (default: 10.0)')
-    parser.add_argument('--pca_models_path', type=str, default=None,
+    parser.add_argument('--pca_models_path', type=str, default='./saved_pcas/HH_PCA_GMM_v2.pt',
                       help='Path to load pre-trained PCA models. If not provided, will train new models.')
     parser.add_argument('--save_pca_models', type=str, default=None,
                       help='Path to save trained PCA models. Only used when training new models.')
-    parser.add_argument('--clustering_method', type=str, default='kmeans',
+    parser.add_argument('--clustering_method', type=str, default='gmm',
                       choices=['kmeans', 'gmm'],
                       help='Clustering method to use: kmeans or gmm')
     
