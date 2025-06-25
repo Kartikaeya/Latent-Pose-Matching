@@ -15,7 +15,6 @@ env/
 .ipynb_checkpoints
 
 # IDE specific files
-.vscode/
 .idea/
 *.swp
 *.swo

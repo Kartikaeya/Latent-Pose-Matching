@@ -1,0 +1,65 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Find Pose",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/find_pose.py",
+            "args": [
+                "--image1",
+                "./data/extreme_pose_right/frame_00001.png",
+                "--render_data_file",
+                "./output/templates/data/template_data_h0_r0.pt",
+                "--debug"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Python: render_aligned_mesh.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/render_aligned_mesh.py",
+            "args": [
+                "--ransac_results",
+                "./pnp_ransac_results.pt",
+                "--obj",
+                "./data/FFHQ_UV_sample/hack_w_HIFI3D_UV.obj",
+                "--texture",
+                "./data/FFHQ_UV_sample/000000.png"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Generate Templates",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/generate_templates.py",
+            "args": [
+                // "--debug"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "sequence pose matching",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/brute_force_template_retrieval.py",
+            "args": [
+                "--query_images_dir",
+                "./data/metaphysic_cropped/",
+                "--output_folder",
+                "./output/affine_template_retrieval_1/"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+                
+        }
+    ]
+}
