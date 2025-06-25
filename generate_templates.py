@@ -20,6 +20,8 @@ import torch.nn.functional as F
 from latent_pca_video import load_model_and_processor, process_image, load_pca_models
 from PIL import Image
 from pathlib import Path
+import json
+from collections import Counter, defaultdict
 
 # Set device
 if torch.cuda.is_available():
@@ -53,7 +55,7 @@ else:
     DEBUG = False
 
 # Create output directory structure
-output_dir = Path(args.output_dir)
+output_dir = Path(args.output_dir) if not DEBUG else Path('./output/templates_debug')
 viz_dir = output_dir / 'visualizations'
 data_dir = output_dir / 'data'
 viz_2d_dir = viz_dir / '2d'
@@ -136,7 +138,7 @@ else:
     )
 
 # Define camera parameters
-heights = [0, 30, -30, 60, -60]  # Heights in degrees
+heights = [0, 30, -30, 45, -45]  # Heights in degrees
 rotations = np.linspace(0, 330, 12)  # 12 rotations around Y axis
 distance = 150  # Distance from origin
 
@@ -149,6 +151,22 @@ model, processor, pca_device = load_model_and_processor(use_registers=True)
 print("Loading PCA models...")
 pca_model_path = './saved_pcas/HH_PCA_GMM_v2.pt'
 pca_mask, pca_rgb, kmeans = load_pca_models(pca_model_path)
+
+# Define distinct colors for each cluster
+cluster_colors = np.array([
+    [1.0, 0.0, 0.0],    # Red
+    [0.0, 1.0, 0.0],    # Green
+    [0.0, 0.0, 1.0],    # Blue
+    [1.0, 1.0, 0.0],    # Yellow
+    [1.0, 0.0, 1.0],    # Magenta
+    [0.0, 1.0, 1.0],    # Cyan
+    [1.0, 0.5, 0.0],    # Orange
+    [0.5, 0.0, 1.0],    # Purple
+    [0.0, 1.0, 0.5]     # Spring Green
+])
+
+# Initialize dictionary to store cluster labels for each template
+template_cluster_labels = {}
 
 # Process each viewpoint
 for height in heights:
@@ -262,8 +280,20 @@ for height in heights:
         world_coords_flat = cameras.unproject_points(xy_depth_flat, world_coordinates=True)
         patch_centers_3d_coords = world_coords_flat.reshape(num_patches, num_patches, 3).detach().clone()
         
+        # Rotate back the patch_centers_3d_coords based on camera rotation about Y-axis
+        rad_rotation = np.radians(-2*rotation)
+        rotation_matrix = torch.tensor([
+            [np.cos(rad_rotation), 0, np.sin(rad_rotation)],
+            [0, 1, 0],
+            [-np.sin(rad_rotation), 0, np.cos(rad_rotation)]
+        ], device=device, dtype=torch.float32)
+        patch_centers_3d_coords = patch_centers_3d_coords @ rotation_matrix.T
+        
         # Apply depth mask to patch centers
         patch_centers_3d_coords[~depth_mask] = float('nan')
+        
+        # flip x coordinates to match the original mesh orientation
+        patch_centers_3d_coords[..., 0] *= -1
         
         # Convert rendered image to PIL Image for DinoV2 processing
         rendered_image_pil = Image.fromarray((rendered_image * 255).astype(np.uint8))
@@ -297,18 +327,34 @@ for height in heights:
             rgb_grid = np.zeros((grid_shape[0], grid_shape[1], 3))
             mask_indices = np.where(binary_mask.reshape(-1) == 1)[0]
             
+            # Normalize RGB values to [0,1] range for visualization
             rgb_min = rgb_latents.min(axis=0)
             rgb_max = rgb_latents.max(axis=0)
             rgb_range = rgb_max - rgb_min
             rgb_range[rgb_range == 0] = 1
             normalized_rgb_latents = (rgb_latents - rgb_min) / rgb_range
             
-            for idx, rgb in zip(mask_indices, normalized_rgb_latents):
+            # Apply GMM clustering
+            cluster_labels = kmeans.predict(rgb_latents)
+            
+            # Store cluster labels for this template
+            template_key = f'template_data_h{height}_r{int(rotation)}.pt'
+            template_cluster_labels[template_key] = cluster_labels
+            
+            # Create cluster visualization
+            cluster_grid = np.zeros((grid_shape[0], grid_shape[1], 3))
+            
+            for idx, (rgb, label) in zip(mask_indices, zip(normalized_rgb_latents, cluster_labels)):
                 row = idx // grid_shape[1]
                 col = idx % grid_shape[1]
                 rgb_grid[row, col] = rgb
+                cluster_grid[row, col] = cluster_colors[label % len(cluster_colors)]
         else:
             rgb_grid = np.zeros((grid_shape[0], grid_shape[1], 3))
+            cluster_grid = np.zeros((grid_shape[0], grid_shape[1], 3))
+            # Store empty cluster labels for this template
+            template_key = f'template_data_h{height}_r{int(rotation)}.pt'
+            template_cluster_labels[template_key] = np.array([])
         
         # Create visualization figure
         plt.figure(figsize=(15, 5))
@@ -319,14 +365,13 @@ for height in heights:
         plt.axis('off')
         
         plt.subplot(132)
-        plt.imshow(latent_grid, cmap='viridis')
-        plt.colorbar(label='Compressed Latent Value')
-        plt.title('First PCA Component')
+        plt.imshow(rgb_grid)
+        plt.title('PCA Latent (3-channel)')
         plt.axis('off')
         
         plt.subplot(133)
-        plt.imshow(rgb_grid)
-        plt.title('PCA Latent (3-channel)')
+        plt.imshow(cluster_grid)
+        plt.title('GMM Clusters')
         plt.axis('off')
         
         plt.tight_layout()
@@ -351,7 +396,7 @@ for height in heights:
         x_coords = x_coords[valid_mask]
         y_coords = y_coords[valid_mask]
         z_coords = z_coords[valid_mask]
-        
+
         scatter = ax.scatter(
             x_coords,
             y_coords,
@@ -373,9 +418,9 @@ for height in heights:
         mid_y = (y_coords.max() + y_coords.min()) * 0.5
         mid_z = (z_coords.max() + z_coords.min()) * 0.5
         
-        ax.set_xlim(mid_x - max_range, mid_x + max_range)
-        ax.set_ylim(mid_y - max_range, mid_y + max_range)
-        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+        ax.set_xlim(-12, 12)
+        ax.set_ylim(-8, 18)
+        ax.set_zlim(-10, 15)
         
         plt.colorbar(scatter, label='Y coordinate')
         ax.set_title('3D Patch Centers')
@@ -413,3 +458,58 @@ for height in heights:
         torch.save(view_data, data_path)
         
         print(f"Saved data for height {height}°, rotation {rotation}°")
+
+# Calculate bag-of-words descriptors after processing all templates
+print("\nCalculating bag-of-words descriptors...")
+N = len(template_cluster_labels)  # total number of templates
+
+# Calculate n_i (number of occurrences of each cluster across all templates)
+cluster_occurrences = defaultdict(int)
+for labels in template_cluster_labels.values():
+    for label in labels:
+        cluster_occurrences[label] += 1
+
+# Calculate descriptors for each template
+all_template_descriptors = {}
+for template_key, labels in template_cluster_labels.items():
+    if len(labels) > 0:
+        # Count occurrences of each cluster in this template
+        cluster_counts = Counter(labels)
+        n_t = len(labels)  # total number of words in this template
+        
+        # Initialize descriptor vector
+        template_descriptor = np.zeros(kmeans.n_components)
+        
+        # Calculate weighted word frequencies
+        for cluster_id, count in cluster_counts.items():
+            n_i_t = count  # number of occurrences of word i in template t
+            n_i = cluster_occurrences[cluster_id]  # number of occurrences of word i in all templates
+            
+            # Calculate TF-IDF like weight
+            if n_t > 0 and n_i > 0:
+                template_descriptor[cluster_id] = (n_i_t / n_t) * np.log(N / n_i)
+    else:
+        template_descriptor = np.zeros(kmeans.n_components)
+    
+    all_template_descriptors[template_key] = template_descriptor
+
+# Update the saved data with descriptors
+for template_key, descriptor in all_template_descriptors.items():
+    data_path = data_dir / template_key
+    view_data = torch.load(data_path)
+    view_data['bag_of_words_descriptor'] = descriptor
+    torch.save(view_data, data_path)
+
+# Save all template descriptors
+descriptors_path = data_dir / 'template_descriptors.json'
+serializable_descriptors = {}
+with open(descriptors_path, 'w') as f:
+    # Convert numpy arrays to lists for JSON serialization
+    serializable_descriptors['bag_of_words_descriptors'] = {
+        k: v.tolist() for k, v in all_template_descriptors.items()
+    }
+    serializable_descriptors['num_templates'] = int(N)
+    serializable_descriptors['cluster_occurrences'] = {int(k): int(v) for k, v in cluster_occurrences.items()}
+    json.dump(serializable_descriptors, f, indent=2)
+
+print(f"Saved all template descriptors to {descriptors_path}")
