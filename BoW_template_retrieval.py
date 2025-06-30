@@ -8,14 +8,9 @@ import torch
 import torch.nn.functional as F
 import argparse
 
-if __name__ == "__main__":
-    # create a parser to get the query image path from the command line
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--query_image', type=str, default="./data/extreme_pose_right/frame_00001.png", help='Path to the query image')
-    args = parser.parse_args()
-
+def get_closest_template_bow(query_image_path, debug=False):
     # read query image
-    query_image = Image.open(args.query_image)
+    query_image = Image.open(query_image_path)
 
     # Load PCA models
     print("Loading PCA models...")
@@ -84,31 +79,14 @@ if __name__ == "__main__":
     else:
         cluster_labels = np.array([])
 
-    # visualize query image, rgb grid, and cluster grid
-    plt.figure(figsize=(15, 5))
-    plt.subplot(131)
-    plt.imshow(query_image)
-    plt.title('Query Image')
-    plt.axis('off')
-    
-    plt.subplot(132)
-    plt.imshow(rgb_grid)
-    plt.title('RGB Grid')
-    plt.axis('off')
-    
-    plt.subplot(133)
-    plt.imshow(cluster_grid)
-    plt.title('Cluster Grid')
-    plt.axis('off')
-    plt.tight_layout()
-    plt.show()
-
     # load bag of words descriptors of all templates from json file
     with open("./output/templates//data/template_descriptors.json", "r") as f:
         json_data = json.load(f)
         template_descriptors = json_data['bag_of_words_descriptors']
         N = json_data['num_templates']
         cluster_occurrences = json_data['cluster_occurrences']
+        template_descriptors = {k: v for k, v in template_descriptors.items() if 'h0' in k and '180' \
+                                not in k and '150' not in k and '210' not in k}
     
     if len(cluster_labels) > 0:
         # Count occurrences of each cluster in this template
@@ -142,13 +120,23 @@ if __name__ == "__main__":
     # get the template keys based on indices
     top_4_template_keys = [list(template_descriptors.keys())[i] for i in top_4_indices]
 
-# visualize top 4 template images with the highest cosine similarity
-    plt.figure(figsize=(15, 5))
-    for i, template_key in enumerate(top_4_template_keys):
-        plt.subplot(1, 4, i+1)
-        template_data = torch.load(f"./output/templates/data/{template_key}")
-        plt.imshow(template_data['rendered_image'].permute(1, 2, 0))
-        plt.title(f'Template {i}')
-        plt.axis('off')
-    plt.tight_layout()
-    plt.show()
+    if debug:
+        # visualize top 4 template images with the highest cosine similarity
+        plt.figure(figsize=(15, 5))
+        for i, template_key in enumerate(top_4_template_keys):
+            plt.subplot(1, 4, i+1)
+            template_data = torch.load(f"./output/templates/data/{template_key}")
+            plt.imshow(template_data['rendered_image'].permute(1, 2, 0))
+            plt.title(f'Template {i}')
+            plt.axis('off')
+        plt.tight_layout()
+        plt.show()
+    return top_4_template_keys
+
+if __name__ == "__main__":
+    # argparse the query image path
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--query_image', type=str, default="./data/extreme_pose_right/frame_00001.png", help='Path to the query image')
+    parser.add_argument('--debug', action='store_true', default=False, help='Debug mode')
+    args = parser.parse_args()
+    get_closest_template_bow(query_image_path=args.query_image, debug=args.debug)

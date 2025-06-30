@@ -3,56 +3,61 @@ from find_pose import visualize_comparison
 import argparse
 import os
 import numpy as np
+from BoW_template_retrieval import get_closest_template_bow
 
 def estimate_pose_from_templates(template_files, template_path, query_image_path, model, processor, device, pca_mask, pca_rgb,
-                                 output_folder='./output/brute_force_retrieval_results/'):
+                                 output_folder='./output/brute_force_retrieval_results/', use_bow_retrieval=False):
     inlier_ratios = []
     num_inliers = []
     feature_matches = []
     num_feature_matches = []
-    for i, template_file in enumerate(template_files):
-        template_path = os.path.join(args.template_folder_path, template_file)
-        print(f"Processing template: {template_path}")
+    if use_bow_retrieval:
+        closest_template = get_closest_template_bow(query_image_path)[0]
+    else:
+        for i, template_file in enumerate(template_files):
+            template_path = os.path.join(args.template_folder_path, template_file)
+            print(f"Processing template: {template_path}")
 
-        # TODO 2: figure out a better way to patchify images without losing resolution
-        rvec, tvec, inlier_ratio, total_feature_matches, match_distances, total_inliers = visualize_comparison(
-            image1_path=query_image_path,
-            render_data_path=template_path,
-            model=model,
-            processor=processor,
-            device=device,
-            pca_mask=pca_mask,
-            pca_rgb=pca_rgb,
-            save_results=False,
-            mesh_path='./data/DNEGSynFace_topology/generic_neutral_mesh.obj',
-            output_folder=output_folder)
-        if inlier_ratio is None:
-            print(f"Skipping template {template_file} due to insufficient feature matches.")
-            continue
-        inlier_ratios.append(inlier_ratio)
-        num_inliers.append(total_inliers)
-        feature_matches.append({'num_feature_match': total_feature_matches, 'match_distances': np.mean(match_distances), 'index': i})
-        num_feature_matches.append(total_feature_matches)
+            # TODO 2: figure out a better way to patchify images without losing resolution
+            rvec, tvec, inlier_ratio, total_feature_matches, match_distances, total_inliers = visualize_comparison(
+                image1_path=query_image_path,
+                render_data_path=template_path,
+                model=model,
+                processor=processor,
+                device=device,
+                pca_mask=pca_mask,
+                pca_rgb=pca_rgb,
+                save_results=False,
+                mesh_path='./data/DNEGSynFace_topology/generic_neutral_mesh.obj',
+                output_folder=output_folder)
+            if inlier_ratio is None:
+                print(f"Skipping template {template_file} due to insufficient feature matches.")
+                continue
+            inlier_ratios.append(inlier_ratio)
+            num_inliers.append(total_inliers)
+            feature_matches.append({'num_feature_match': total_feature_matches, 'match_distances': np.mean(match_distances), 'index': i})
+            num_feature_matches.append(total_feature_matches)
+            
+        threshold = np.array(num_feature_matches).mean()
+        inlier_ratios = [inlier_ratios[i] if num_feature_matches[i] > threshold else 0 for i in range(len(inlier_ratios))]
+        sorted_num_feature_matches = sorted(feature_matches, key=lambda x: x['num_feature_match'], reverse=True) 
+        sorted_match_distances = sorted(feature_matches, key=lambda x: x['match_distances'])
         
-    threshold = np.array(num_feature_matches).mean()
-    inlier_ratios = [inlier_ratios[i] if num_feature_matches[i] > threshold else 0 for i in range(len(inlier_ratios))]
-    sorted_num_feature_matches = sorted(feature_matches, key=lambda x: x['num_feature_match'], reverse=True) 
-    sorted_match_distances = sorted(feature_matches, key=lambda x: x['match_distances'])
-    
-    
-    best_template_inlier_ratio = inlier_ratios.index(max(inlier_ratios))
-    best_template_num_inliers = np.argmax(num_inliers)
-    best_template_num_feature_matches = sorted_num_feature_matches[0]['index']
-    best_template_match_distances = sorted_match_distances[0]['index']
+        
+        best_template_inlier_ratio = inlier_ratios.index(max(inlier_ratios))
+        best_template_num_inliers = np.argmax(num_inliers)
+        best_template_num_feature_matches = sorted_num_feature_matches[0]['index']
+        best_template_match_distances = sorted_match_distances[0]['index']
 
-    print(f"Best template file based on inliers ratio: {template_files[best_template_inlier_ratio]}")
-    print(f"Best template file based on number of inliers: {template_files[best_template_num_inliers]}")
-    print(f'Best template file based on number of feature matches: {template_files[best_template_num_feature_matches]}')
-    print(f'Best template file based on match distances: {template_files[best_template_match_distances]}')
+        print(f"Best template file based on inliers ratio: {template_files[best_template_inlier_ratio]}")
+        print(f"Best template file based on number of inliers: {template_files[best_template_num_inliers]}")
+        print(f'Best template file based on number of feature matches: {template_files[best_template_num_feature_matches]}')
+        print(f'Best template file based on match distances: {template_files[best_template_match_distances]}')
+        closest_template = template_files[best_template_match_distances]
     query_image_file = os.path.basename(query_image_path)
     visualize_comparison(
         image1_path=query_image_path,
-        render_data_path=os.path.join(args.template_folder_path, template_files[best_template_match_distances]),
+        render_data_path=os.path.join(args.template_folder_path, closest_template),
         model=model,
         processor=processor,
         device=device,
@@ -62,9 +67,9 @@ def estimate_pose_from_templates(template_files, template_path, query_image_path
         mesh_path='./data/DNEGSynFace_topology/generic_neutral_mesh.obj',
         filename=query_image_file[:-4],
         output_folder=output_folder,
-        plot_title=f'PE based number of feature match distance (PnPRansac)'
+        plot_title=f'PE based number of feature match distance (PnPRansac)' if not use_bow_retrieval else f'PE based BoW retrieval'
     )
-    return None, None, best_template_num_inliers
+    return None, None, closest_template
 
 def get_closest_template(tvec, best_template_index, template_tvecs):
     prev_fit_tvec = tvec / np.linalg.norm(tvec)
@@ -94,6 +99,7 @@ if __name__ == "__main__":
     'template data rendered from different poses')
     parser.add_argument('--pca_model', type=str, default='./saved_pcas/HH_PCA_GMM_v2.pt', help='Path to the folder containing PCA models for mask and RGB')
     parser.add_argument('--output_folder', type=str, default='./output/brute_force_retrieval_results/', help='Path to the output folder for results')
+    parser.add_argument('--use_bow_retrieval', action='store_true', default=False, help='Use BoW retrieval to get the closest template')
     args = parser.parse_args()
     
     # Load model and processor
@@ -126,5 +132,5 @@ if __name__ == "__main__":
         query_image_path = os.path.join(query_images_dir, query_image_file)
         print(f"Processing query image: {query_image_file}")
         rvec, tvec, best_template_index = estimate_pose_from_templates(template_files, args.template_folder_path, query_image_path, model, processor, device, pca_mask, 
-                                        pca_rgb, args.output_folder)
+                                        pca_rgb, args.output_folder, args.use_bow_retrieval)
         
