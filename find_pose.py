@@ -140,21 +140,24 @@ def estimate_pose(real_points_2d, rendered_points_3d, camera_matrix, select_top_
         plt.show()
     
     reprojection_error = 14
-    # Use PnP-RANSAC with stricter parameters for more reliable matches
-    success, rvec, tvec, inliers = cv2.solvePnPRansac(
-        rendered_points_3d, 
-        real_points_2d, 
-        camera_matrix, 
-        None,
-        iterationsCount=50000,  # More iterations for better convergence
-        reprojectionError=reprojection_error,  # Stricter reprojection error (was 12.0)
-        confidence=0.99,  # Higher confidence threshold (was 0.95)
-        flags=cv2.SOLVEPNP_EPNP,  # Using EPNP for better initialization
-    )
-    
+    try:
+        # Use PnP-RANSAC with stricter parameters for more reliable matches
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(
+            rendered_points_3d, 
+            real_points_2d, 
+            camera_matrix, 
+            None,
+            iterationsCount=50000,  # More iterations for better convergence
+            reprojectionError=reprojection_error,  # Stricter reprojection error (was 12.0)
+            confidence=0.99,  # Higher confidence threshold (was 0.95)
+            flags=cv2.SOLVEPNP_EPNP,  # Using EPNP for better initialization
+        )
+    except:
+        print("PnP pose estimation failed")
+        return None, None, None, 0.0, False
     if not success:
         print("PnP pose estimation failed")
-        return None, None, None, 0.0
+        return None, None, None, 0.0, success
     
     # Ensure rvec and tvec are in the correct format
     rvec = np.asarray(rvec, dtype=np.float32)
@@ -173,7 +176,7 @@ def estimate_pose(real_points_2d, rendered_points_3d, camera_matrix, select_top_
         print(f"Total number of points: {len(real_points_2d)}")
         print(f"Percentage of inliers: {len(inliers) / len(real_points_2d):.2f}")
         print('\n\n')
-    return rvec, tvec, inliers,len(inliers) / len(real_points_2d)
+    return rvec, tvec, inliers,len(inliers) / len(real_points_2d), success
 
 def render_mesh_overlay(mesh_path, rvec, tvec, fov, image_size, original_image, camera_matrix, image_size_opencv_np):
     """Render a mesh using PyTorch3D and create an overlay with the original image.
@@ -447,7 +450,7 @@ def visualize_comparison(image1_path, render_data_path, output_folder,  model, p
             tvec = np.zeros((3, 1), dtype=np.float32)
 
         else:
-            rvec, tvec, inliers, inlier_ratio = estimate_pose(
+            rvec, tvec, inliers, inlier_ratio, success = estimate_pose(
                 real_points_2d_scaled,
                 rendered_points_3d, 
                 initial_camera_matrix,
@@ -455,28 +458,6 @@ def visualize_comparison(image1_path, render_data_path, output_folder,  model, p
             )
         if not save_results:            
             return rvec, tvec, inlier_ratio, len(all_matches), match_distances, 0 if inliers is None else len(inliers)
-        R, _ = cv2.Rodrigues(rvec)
-        camera_matrix = initial_camera_matrix
-        
-        # Save the results for use in render_ict-face.py
-        results = {
-            'rotation_matrix': R,  # 3x3 rotation matrix
-            'translation_vector': tvec,  # 3x1 translation vector
-            'camera_matrix': camera_matrix,  # 3x3 camera matrix
-            'real_points_2d': real_points_2d_scaled,  # 2D points at 518x518 resolution
-            'original_image': np.array(img1),  # Original image as numpy array
-            'image_size': img1.size,  # Original image size
-            'focal_length': focal_length,  # Focal length for PyTorch3D
-            'principal_point': principal_point.cpu().numpy(),  # Principal point for PyTorch3D
-            'fov': fov,  # Field of view in degrees
-        }
-        if not os.path.exists(output_folder):
-            os.makedirs(output_folder)
-
-        # Save results to a file
-        output_path = Path(output_folder) / "pnp_ransac_results.pt"
-        torch.save(results, output_path)
-        print(f"\nSaved PnP RANSAC results to {output_path}")
         
         # Visualize the pose estimation
         plt.figure(figsize=(30, 20))
@@ -507,12 +488,6 @@ def visualize_comparison(image1_path, render_data_path, output_folder,  model, p
         plt.legend()
         plt.axis('off')
 
-        # Project all mesh vertices using estimated pose and camera intrinsics
-        projected_verts, _ = cv2.projectPoints(
-            verts_np, rvec, tvec, camera_matrix, None
-        )
-        projected_verts = projected_verts.reshape(-1, 2)
-
         # display rendered_image_pil
         plt.subplot(234)
         plt.imshow(rendered_image_pil)
@@ -525,8 +500,16 @@ def visualize_comparison(image1_path, render_data_path, output_folder,  model, p
 
         plt.subplot(236)
         plt.imshow(np.array(img1))
-        plt.scatter(projected_verts[:, 0], projected_verts[:, 1], s=1, c='cyan', alpha=0.7, label='Mesh Vertices')
-        plt.title('Projected Mesh Vertices', fontsize=25)
+        if success:
+            # Project all mesh vertices using estimated pose and camera intrinsics
+            projected_verts, _ = cv2.projectPoints(
+                verts_np, rvec, tvec, initial_camera_matrix, None
+            )
+            projected_verts = projected_verts.reshape(-1, 2)
+            plt.scatter(projected_verts[:, 0], projected_verts[:, 1], s=1, c='cyan', alpha=0.7, label='Mesh Vertices')
+            plt.title('Projected Mesh Vertices', fontsize=25)
+        else:
+            plt.title('Pose Estimation failed', fontsize=25)
         plt.axis('off')
             
         plt.tight_layout()
