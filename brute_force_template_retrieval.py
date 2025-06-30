@@ -25,8 +25,7 @@ def estimate_pose_from_templates(template_files, template_path, query_image_path
             pca_rgb=pca_rgb,
             save_results=False,
             mesh_path='./data/DNEGSynFace_topology/generic_neutral_mesh.obj',
-            output_folder=output_folder,
-            use_affine_estimation=True)
+            output_folder=output_folder)
         if inlier_ratio is None:
             print(f"Skipping template {template_file} due to insufficient feature matches.")
             continue
@@ -53,7 +52,7 @@ def estimate_pose_from_templates(template_files, template_path, query_image_path
     query_image_file = os.path.basename(query_image_path)
     visualize_comparison(
         image1_path=query_image_path,
-        render_data_path=os.path.join(args.template_folder_path, template_files[best_template_num_inliers]),
+        render_data_path=os.path.join(args.template_folder_path, template_files[best_template_match_distances]),
         model=model,
         processor=processor,
         device=device,
@@ -63,7 +62,7 @@ def estimate_pose_from_templates(template_files, template_path, query_image_path
         mesh_path='./data/DNEGSynFace_topology/generic_neutral_mesh.obj',
         filename=query_image_file[:-4],
         output_folder=output_folder,
-        plot_title=f'Pose Estimation based on template with most number of inliers (Affine)'
+        plot_title=f'PE based number of feature match distance (PnPRansac)'
     )
     return None, None, best_template_num_inliers
 
@@ -90,7 +89,7 @@ def get_closest_template(tvec, best_template_index, template_tvecs):
 if __name__ == "__main__":
     # create a parser to get the query image path from the command line
     parser = argparse.ArgumentParser()
-    parser.add_argument('--query_images_dir', type=str, default="./data/extreme_pose_right/", help='Path to the query images folder')
+    parser.add_argument('--query_images_dir', type=str, default="./data/metaphysic_cropped/", help='Path to the query images folder')
     parser.add_argument('--template_folder_path', type=str, default='./output/templates/data/', help='Path to the folder containing ' \
     'template data rendered from different poses')
     parser.add_argument('--pca_model', type=str, default='./saved_pcas/HH_PCA_GMM_v2.pt', help='Path to the folder containing PCA models for mask and RGB')
@@ -121,7 +120,8 @@ if __name__ == "__main__":
     
     if len(query_image_files) == 0:
         raise ValueError("No query images found in the specified directory.")
-    
+    if not os.path.exists(args.output_folder):
+        os.mkdir(args.output_folder)
     for i, query_image_file in enumerate(query_image_files):
         query_image_path = os.path.join(query_images_dir, query_image_file)
         print(f"Processing query image: {query_image_file}")
