@@ -498,16 +498,40 @@ def visualize_comparison(image1_path, render_data_path, output_folder,  model, p
         plt.imshow(rgb_grid2)
         plt.title('RGB PCA Latents (Rendered Image)', fontsize=25)
 
-        plt.subplot(236)
-        plt.imshow(np.array(img1))
+        ax = plt.subplot(236)
+        plt.imshow(np.array(img1), origin='lower')
         if success:
             # Project all mesh vertices using estimated pose and camera intrinsics
             projected_verts, _ = cv2.projectPoints(
                 verts_np, rvec, tvec, initial_camera_matrix, None
             )
             projected_verts = projected_verts.reshape(-1, 2)
-            plt.scatter(projected_verts[:, 0], projected_verts[:, 1], s=1, c='cyan', alpha=0.7, label='Mesh Vertices')
+
+            # 2. Define your desired coordinate range
+            x_min, x_max = 0, img1.size[0]
+            y_min, y_max = 0, img1.size[1]
+
+            # 3. Filter the keypoints using boolean indexing
+            # Condition for x-coordinates
+            x_within_range = (projected_verts[:, 0] >= x_min) & (projected_verts[:, 0] <= x_max)
+
+            # Condition for y-coordinates
+            y_within_range = (projected_verts[:, 1] >= y_min) & (projected_verts[:, 1] <= y_max)
+
+            # Combine both conditions: a point must satisfy both x and y ranges
+            within_range_mask = x_within_range & y_within_range
+
+            # Apply the mask to get only the keypoints within the desired range
+            filtered_keypoints = projected_verts[within_range_mask]
+            plt.scatter(filtered_keypoints[:, 0], filtered_keypoints[:, 1], s=1, c='cyan', alpha=0.7, label='Mesh Vertices')
             plt.title('Projected Mesh Vertices', fontsize=25)
+
+            # Set fixed axis limits
+            ax.set_xlim(0, img1.size[0])
+            ax.set_ylim(img1.size[1], 0)
+
+            # Ensure equal aspect ratio
+            ax.set_aspect('equal') 
         else:
             plt.title('Pose Estimation failed', fontsize=25)
         plt.axis('off')
