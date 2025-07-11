@@ -60,6 +60,20 @@
             "console": "integratedTerminal",
             "justMyCode": true
                 
+        },
+        {
+            "name": "Latent Cropping",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/latent_cropping.py",
+            "args": [
+                "--img_dir",
+                "./data/metaphysic/",
+                "--output_dir",
+                "./output/MP_latent_crop_test/",
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
         }
     ]
 }

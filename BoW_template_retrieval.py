@@ -8,6 +8,27 @@ import torch
 import torch.nn.functional as F
 import argparse
 
+def compute_template_descriptor(cluster_labels, kmeans, cluster_occurrences, N):
+    if len(cluster_labels) > 0:
+        # Count occurrences of each cluster in this template
+        cluster_counts = Counter(cluster_labels)
+        n_t = len(cluster_labels)  # total number of words in this template
+        
+        # Initialize descriptor vector
+        template_descriptor = np.zeros(kmeans.n_components)
+        
+        # Calculate weighted word frequencies
+        for cluster_id, count in cluster_counts.items():
+            n_i_t = count  # number of occurrences of word i in template t
+            n_i = cluster_occurrences[str(cluster_id)]  # number of occurrences of word i in all templates
+            
+            # Calculate TF-IDF like weight
+            if n_t > 0 and n_i > 0:
+                template_descriptor[cluster_id] = (n_i_t / n_t) * np.log(N / n_i)
+    else:
+        template_descriptor = np.zeros(kmeans.n_components)
+    return template_descriptor
+
 def get_closest_template_bow(query_image_path, debug=False):
     # read query image
     query_image = Image.open(query_image_path)
@@ -88,24 +109,7 @@ def get_closest_template_bow(query_image_path, debug=False):
         template_descriptors = {k: v for k, v in template_descriptors.items() if 'h0' in k and '180' \
                                 not in k and '150' not in k and '210' not in k}
     
-    if len(cluster_labels) > 0:
-        # Count occurrences of each cluster in this template
-        cluster_counts = Counter(cluster_labels)
-        n_t = len(cluster_labels)  # total number of words in this template
-        
-        # Initialize descriptor vector
-        template_descriptor = np.zeros(kmeans.n_components)
-        
-        # Calculate weighted word frequencies
-        for cluster_id, count in cluster_counts.items():
-            n_i_t = count  # number of occurrences of word i in template t
-            n_i = cluster_occurrences[str(cluster_id)]  # number of occurrences of word i in all templates
-            
-            # Calculate TF-IDF like weight
-            if n_t > 0 and n_i > 0:
-                template_descriptor[cluster_id] = (n_i_t / n_t) * np.log(N / n_i)
-    else:
-        template_descriptor = np.zeros(kmeans.n_components)
+    template_descriptor = compute_template_descriptor(cluster_labels, kmeans, cluster_occurrences, N)
     
     query_image_bag_of_words = template_descriptor
 

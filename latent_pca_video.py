@@ -45,7 +45,14 @@ def pad_to_square(image):
     
     return new_image
 
-def process_image(image_input, model, processor, device, use_custom_preprocessing=False, use_registers=False):
+def resize_to_patch_size_multiple(image, patch_size):
+    """Resize the image to make it a multiple of patch_size."""
+    width, height = image.size
+    new_width = (width // patch_size) * patch_size
+    new_height = (height // patch_size) * patch_size
+    return image.resize((new_width, new_height), Image.Resampling.LANCZOS), (new_width // patch_size, new_height // patch_size)
+
+def process_image(image_input, model, processor, device, use_custom_preprocessing=False, use_registers=False, operate_at_original_size=False):
     """Process a single image and return its token embeddings.
     
     Args:
@@ -67,10 +74,17 @@ def process_image(image_input, model, processor, device, use_custom_preprocessin
     else:
         original_image = image_input
     
+    patch_size = 14
     if use_custom_preprocessing:
-        # Pad to square and resize to 518x518
-        processed_image = pad_to_square(original_image)
-        processed_image = processed_image.resize((518, 518), Image.Resampling.LANCZOS)
+        if operate_at_original_size:
+            processed_image = original_image
+            processed_image, (grid_h, grid_w) = resize_to_patch_size_multiple(processed_image, patch_size)
+        else:
+            # Pad to square and resize to 518x518
+            processed_image = pad_to_square(original_image)
+            processed_image = processed_image.resize((518, 518), Image.Resampling.LANCZOS)
+            # Grid dimensions are always 37x37 for standard processing
+            grid_h = grid_w = 37
         
         # Convert to numpy array and then to tensor
         image_array = np.array(processed_image)
@@ -111,9 +125,6 @@ def process_image(image_input, model, processor, device, use_custom_preprocessin
     else:
         # Skip only CLS token (skip first token)
         token_embeddings = last_hidden_state[1:].cpu().numpy()
-    
-    # Grid dimensions are always 37x37 for standard processing
-    grid_h = grid_w = 37
     
     return token_embeddings, processed_image, (grid_h, grid_w)
 
@@ -256,12 +267,12 @@ def train_pca_models(image_files, model, processor, device, use_custom_preproces
     print(f"Training {clustering_method}...")
     rgb_latents = pca_rgb.transform(filtered_embeddings)
     if clustering_method == 'kmeans':
-        kmeans = KMeans(n_clusters=9, random_state=0)
+        kmeans = KMeans(n_clusters=11, random_state=0)
         kmeans.fit(rgb_latents)
         save_pca_models(pca_mask, pca_rgb, kmeans, "pca_models.pt")
         return pca_mask, pca_rgb, kmeans
     elif clustering_method == 'gmm':
-        gmm = GaussianMixture(n_components=9, random_state=0, covariance_type='full')
+        gmm = GaussianMixture(n_components=11, random_state=0, covariance_type='full')
         gmm.fit(rgb_latents)
         
         # Save models
@@ -301,7 +312,7 @@ def train_pca_models(image_files, model, processor, device, use_custom_preproces
         raise ValueError(f"Unknown clustering method: {clustering_method}")
 
 def process_sequence_with_pca(image_files, model, processor, device, pca_mask, pca_rgb, kmeans,
-                            output_dir, use_custom_preprocessing, use_registers, threshold_greater_than):
+                            output_dir, use_custom_preprocessing, use_registers, threshold_greater_than, operate_at_original_size):
     """Process a sequence of images using pre-trained PCA models."""
     for frame_idx, image_path in enumerate(image_files):
         print(f"\nProcessing frame {frame_idx + 1}/{len(image_files)}: {image_path}")
@@ -309,7 +320,7 @@ def process_sequence_with_pca(image_files, model, processor, device, pca_mask, p
         # Process image and get latent vector
         token_embeddings, processed_image, grid_shape = process_image(
             image_path, model, processor, device, 
-            use_custom_preprocessing, use_registers
+            use_custom_preprocessing, use_registers, operate_at_original_size
         )
         
         # Project onto learned PCA
@@ -345,7 +356,9 @@ def process_sequence_with_pca(image_files, model, processor, device, pca_mask, p
                 [0.0, 1.0, 1.0],    # Cyan
                 [1.0, 0.5, 0.0],    # Orange
                 [0.5, 0.0, 1.0],    # Purple
-                [0.0, 1.0, 0.5]     # Spring Green
+                [0.0, 1.0, 0.5],    # Spring Green
+                [0.5, 1.0, 0.0],    # Lime Green
+                [1.0, 0.0, 0.5]     # Pink
             ])
             
             # Create RGB visualization
@@ -372,7 +385,7 @@ def process_sequence_with_pca(image_files, model, processor, device, pca_mask, p
             normalized_rgb_latents = (rgb_latents - rgb_min) / rgb_range
             
             for idx, (rgb, label) in zip(mask_indices, zip(normalized_rgb_latents, cluster_labels)):
-                row = idx // grid_w
+                row = idx // grid_h
                 col = idx % grid_w
                 rgb_grid[row, col] = rgb
                 cluster_grid[row, col] = cluster_colors[label]
@@ -445,14 +458,15 @@ def main():
                       help='Threshold for values greater than 0 instead of less than 0')
     parser.add_argument('--pca_train_percent', type=float, default=10.0,
                       help='Percentage of frames to use for PCA training (default: 10.0)')
-    parser.add_argument('--pca_models_path', type=str, default='./saved_pcas/HH_PCA_GMM_v2.pt',
+    parser.add_argument('--pca_models_path', type=str,
                       help='Path to load pre-trained PCA models. If not provided, will train new models.')
     parser.add_argument('--save_pca_models', type=str, default=None,
                       help='Path to save trained PCA models. Only used when training new models.')
     parser.add_argument('--clustering_method', type=str, default='gmm',
                       choices=['kmeans', 'gmm'],
                       help='Clustering method to use: kmeans or gmm')
-    
+    parser.add_argument('--operate_at_original_size', action='store_true', default=False,
+                      help='Operate at original size instead of 518x518')
     args = parser.parse_args()
     
     # Create output directory if it doesn't exist
@@ -479,7 +493,7 @@ def main():
         pca_mask, pca_rgb, kmeans = load_pca_models(args.pca_models_path)
         process_sequence_with_pca(image_files, model, processor, device, pca_mask, pca_rgb, kmeans,
                                 args.output_dir, args.use_custom_preprocessing, 
-                                args.use_registers, args.threshold_greater_than)
+                                args.use_registers, args.threshold_greater_than, args.operate_at_original_size)
     else:
         # Train PCA models and clustering
         print("\nTraining PCA models and clustering...")
@@ -533,7 +547,7 @@ def main():
         # Process all frames using the learned PCA
         process_sequence_with_pca(image_files, model, processor, device, pca_mask, pca_rgb, kmeans,
                                 args.output_dir, args.use_custom_preprocessing, 
-                                args.use_registers, args.threshold_greater_than)
+                                args.use_registers, args.threshold_greater_than, args.operate_at_original_size)
     
     print("\nProcessing complete!")
 
